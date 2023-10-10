@@ -5,10 +5,13 @@ import uuid
 
 from fastapi import FastAPI
 from pydantic import BaseModel
+from starlette import status
+from starlette.responses import Response
 from tortoise.contrib.fastapi import register_tortoise
 
-from models import Task
+from models import TaskDb
 
+ACCEPTED_OPERATORS = '+-/*'
 app = FastAPI()
 
 
@@ -18,39 +21,45 @@ class Data(BaseModel):
     operator: str
 
 
-@app.post("/calculate")
-async def calculate(data: Data):
+@app.post("/calculate", status_code=201)
+async def calculate(data: Data, response: Response):
     uuid_id = uuid.uuid4()
     x = data.x
     y = data.y
     operator = data.operator
-    if len(operator) > 1 or operator not in '+-/*':
+    if len(operator) > 1 or operator not in ACCEPTED_OPERATORS:
+        response.status_code = status.HTTP_422_UNPROCESSABLE_ENTITY
         return {"detail": 'invalid operator'}
     if y == 0 and operator == "/":
+        response.status_code = status.HTTP_422_UNPROCESSABLE_ENTITY
         return {"detail": 'invalid data (divide by zero)'}
-    asyncio.ensure_future(start_task(x, y, operator, uuid_id))
-    user_obj = await Task.create(id=uuid_id, status='in progress')
-    return {"id": uuid_id}
+    task_id = await TaskDb.create(uuid=uuid_id, status='in progress')
+    asyncio.ensure_future(start_task(x, y, operator, task_id.id))
+
+    return {"id": task_id.id}
 
 
-@app.get("/getresult")
-async def getresult(uuid_id: str):
-    result = await Task.get_or_none(id=uuid_id)
-    return {"result": result}
+@app.get("/getresult", status_code=200)
+async def getresult(task_id: int, response: Response):
+    result = await TaskDb.get_or_none(id=task_id)
+    if not result:
+        response.status_code = status.HTTP_404_NOT_FOUND
+        return {"error": "id not found"}
+    if result.status == 'in progress':
+        return {"await": "task in progress"}
+    return {"result": result.result}
 
 
-@app.get("/gettask")
+@app.get("/task")
 async def gettask():
-    tasks = []
-    async for task in Task.all():
-        tasks.append(task)
+    tasks = [task async for task in TaskDb.all()]
     return {"tasks": tasks}
 
 
-async def start_task(x: int, y: int, operator: str, uuid_id: uuid):
-    await asyncio.sleep(random.choice(range(1, 16)))
+async def start_task(x: int, y: int, operator: str, task_id: int):
+    await asyncio.sleep(random.choice(range(1, 2)))
     result = eval(f'{x}{operator}{y}')
-    await Task.filter(id=uuid_id).update(result=result, status='Done', finished_at=datetime.datetime.now())
+    await TaskDb.filter(id=task_id).update(result=result, status='Done', finished_at=datetime.datetime.now())
 
 
 register_tortoise(
